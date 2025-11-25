@@ -3,121 +3,126 @@
 #include <thread>
 #include <mutex>
 #include <string>
-#include <algorithm>
-#include <winsock2.h>
-#include <ws2tcpip.h>
+#include <cstring>        // для работы с char массивами
+#include <algorithm>      // для поиска в векторе
+#include <winsock2.h>     // библиотека сокетов
 
+// Линковка библиотеки (чтобы работало в Visual Studio)
+// Для VS Code все равно нужен флаг -lws2_32
 #pragma comment(lib, "ws2_32.lib")
 
 using namespace std;
 
-vector<SOCKET> clients;
-mutex clientsMutex;
+// Глобальные переменные (чтобы были видны везде)
+vector<SOCKET> connections; 
+mutex mtx; // мьютекс для защиты списка от одновременного доступа
 
-void RemoveClient(SOCKET clientSocket) {
-    lock_guard<mutex> lock(clientsMutex);
-    auto it = find(clients.begin(), clients.end(), clientSocket);
-    if (it != clients.end()) {
-        clients.erase(it);
-        cout << "Клиент удален. Всего клиентов: " << clients.size() << endl;
-    }
-}
+// Функция для работы с отдельным клиентом
+void ClientHandler(SOCKET current_client) {
+    char msg[1024]; // буфер для сообщения
 
-void BroadcastMessage(string message, SOCKET senderSocket) {
-    lock_guard<mutex> lock(clientsMutex);
-    for (SOCKET client : clients) {
-        if (client != senderSocket) {
-            int sendResult = send(client, message.c_str(), message.size() + 1, 0);
-            if (sendResult == SOCKET_ERROR) {
-               
-            }
-        }
-    }
-}
-
-void HandleClient(SOCKET clientSocket) {
-    char buffer[4096];
-    
     while (true) {
-        ZeroMemory(buffer, 4096);
-        
-        int bytesReceived = recv(clientSocket, buffer, 4096, 0);
+        // Очищаем буфер перед приемом
+        memset(msg, 0, sizeof(msg));
 
-        if (bytesReceived <= 0) {
-            cout << "Клиент отключился." << endl;
+        // Ждем сообщение от клиента
+        // recv останавливает программу тут, пока не придут данные
+        int bytes = recv(current_client, msg, sizeof(msg), 0);
+
+        // Если bytes <= 0, значит ошибка или клиент вышел
+        if (bytes <= 0) {
+            cout << "Client disconnected." << endl;
             break; 
         }
 
-        string msg(buffer, 0, bytesReceived);
-        cout << "Получено: " << msg << endl;
-        BroadcastMessage(msg, clientSocket);
+        // Выводим в консоль сервера
+        cout << "Message: " << msg << endl;
+
+        // РАССЫЛКА ВСЕМ (Broadcasting)
+        // Блокируем доступ, чтобы другие потоки не мешали
+        mtx.lock();
+        for (int i = 0; i < connections.size(); i++) {
+            // Отправляем всем, кроме самого отправителя
+            if (connections[i] != current_client) {
+                send(connections[i], msg, bytes, 0);
+            }
+        }
+        mtx.unlock(); // Обязательно разблокируем!
     }
 
-    closesocket(clientSocket);
-    RemoveClient(clientSocket);
+    // Когда цикл закончился (клиент вышел):
+    closesocket(current_client);
+
+    // Удаляем его из списка
+    mtx.lock();
+    auto it = find(connections.begin(), connections.end(), current_client);
+    if (it != connections.end()) {
+        connections.erase(it);
+    }
+    mtx.unlock();
 }
 
 int main() {
-    SetConsoleOutputCP(65001);
-
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        cout << "Ошибка WSAStartup." << endl;
-        return 1;
-    }
-
-    SOCKET serverSocket = socket(AF_INET, SOCK_STREAM, 0);
-    if (serverSocket == INVALID_SOCKET) {
-        cout << "Ошибка создания сокета." << endl;
-        return 1;
-    }
+    // Включаем поддержку русского языка в консоли
+    setlocale(LC_ALL, "Russian");
     
-    sockaddr_in serverHint;
-    serverHint.sin_family = AF_INET;
-    serverHint.sin_port = htons(54000);
-    serverHint.sin_addr.s_addr = INADDR_ANY;
-
-    if (bind(serverSocket, (sockaddr*)&serverHint, sizeof(serverHint)) == SOCKET_ERROR) {
-        cout << "Ошибка привязки (bind)." << endl;
+    // 1. Загрузка библиотеки Winsock
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
+        cout << "Error: WSAStartup failed" << endl;
         return 1;
     }
 
-    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
-        cout << "Ошибка прослушивания (listen)." << endl;
+    // 2. Создаем сокет сервера
+    // AF_INET = интернет (IP), SOCK_STREAM = TCP
+    SOCKET server_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_socket == INVALID_SOCKET) {
+        cout << "Error: Socket creation failed" << endl;
         return 1;
     }
 
-    cout << "Сервер запущен и слушает порт 54000..." << endl;
+    // 3. Настраиваем адрес и порт
+    sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(54000); // Порт 54000
+    addr.sin_addr.s_addr = INADDR_ANY; // Слушаем любой IP
 
+    // 4. Привязываем сокет (bind)
+    if (bind(server_socket, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
+        cout << "Error: Bind failed. Port busy?" << endl;
+        return 1;
+    }
+
+    // 5. Запускаем прослушку
+    listen(server_socket, SOMAXCONN);
+    cout << "Server started on port 54000..." << endl;
+
+    // Главный цикл приема подключений
     while (true) {
-        sockaddr_in clientAddr;
-        int clientSize = sizeof(clientAddr);
-        SOCKET clientSocket = accept(serverSocket, (sockaddr*)&clientAddr, &clientSize);
+        sockaddr_in client_addr;
+        int addr_size = sizeof(client_addr);
 
-        if (clientSocket == INVALID_SOCKET) continue;
+        // Ждем подключения (программа стоит тут)
+        SOCKET new_conn = accept(server_socket, (sockaddr*)&client_addr, &addr_size);
 
-        char host[NI_MAXHOST];      
-        char service[NI_MAXSERV]; 
-        ZeroMemory(host, NI_MAXHOST); 
-        ZeroMemory(service, NI_MAXSERV);
-
-        if (getnameinfo((sockaddr*)&clientAddr, sizeof(clientAddr), host, NI_MAXHOST, service, NI_MAXSERV, 0) == 0) {
-            cout << host << " подключился через порт " << service << endl;
-        } else {
-            inet_ntop(AF_INET, &clientAddr.sin_addr, host, NI_MAXHOST);
-            cout << host << " подключился через порт " << ntohs(clientAddr.sin_port) << endl;
-        }
-        
-        {
-            lock_guard<mutex> lock(clientsMutex);
-            clients.push_back(clientSocket);
+        if (new_conn == INVALID_SOCKET) {
+            continue; // Если ошибка, просто идем дальше
         }
 
-        thread t(HandleClient, clientSocket);
-        t.detach();
+        cout << "New client connected!" << endl;
+
+        // Добавляем в общий список
+        mtx.lock();
+        connections.push_back(new_conn);
+        mtx.unlock();
+
+        // Создаем поток для этого клиента
+        thread t(ClientHandler, new_conn);
+        t.detach(); // Отпускаем поток в свободное плавание
     }
 
-    closesocket(serverSocket);
+    // Чистим за собой (хотя до сюда код не дойдет из-за while(true))
+    closesocket(server_socket);
     WSACleanup();
     return 0;
 }
