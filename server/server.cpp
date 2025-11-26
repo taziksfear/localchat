@@ -17,37 +17,45 @@ using namespace std;
 vector<SOCKET> connections; 
 mutex mtx; // мьютекс для защиты списка от одновременного доступа
 
-// Функция для работы с отдельным клиентом
-void ClientHandler(SOCKET current_client) {
+// Функция для обработки сообщений от клиента
+bool ProcessClientMessage(SOCKET current_client) {
     char msg[1024]; // буфер для сообщения
 
-    while (true) {
-        // Очищаем буфер перед приемом
-        memset(msg, 0, sizeof(msg));
+    // Очищаем буфер перед приемом
+    memset(msg, 0, sizeof(msg));
 
-        // Ждем сообщение от клиента
-        // recv останавливает программу тут, пока не придут данные
-        int bytes = recv(current_client, msg, sizeof(msg), 0);
+    // Ждем сообщение от клиента
+    // recv останавливает программу тут, пока не придут данные
+    int bytes = recv(current_client, msg, sizeof(msg), 0);
 
-        // Если bytes <= 0, значит ошибка или клиент вышел
-        if (bytes <= 0) {
-            cout << "Client disconnected." << endl;
-            break; 
+    // Если bytes <= 0, значит ошибка или клиент вышел
+    if (bytes <= 0) {
+        cout << "Client disconnected." << endl;
+        return false; // сигнализируем о разрыве соединения
+    }
+
+    // Выводим в консоль сервера
+    cout << "Message: " << msg << endl;
+
+    // РАССЫЛКА ВСЕМ (Broadcasting)
+    // Блокируем доступ, чтобы другие потоки не мешали
+    mtx.lock();
+    for (int i = 0; i < connections.size(); i++) {
+        // Отправляем всем, кроме самого отправителя
+        if (connections[i] != current_client) {
+            send(connections[i], msg, bytes, 0);
         }
+    }
+    mtx.unlock(); // Обязательно разблокируем!
+    
+    return true; // соединение активно
+}
 
-        // Выводим в консоль сервера
-        cout << "Message: " << msg << endl;
-
-        // РАССЫЛКА ВСЕМ (Broadcasting)
-        // Блокируем доступ, чтобы другие потоки не мешали
-        mtx.lock();
-        for (int i = 0; i < connections.size(); i++) {
-            // Отправляем всем, кроме самого отправителя
-            if (connections[i] != current_client) {
-                send(connections[i], msg, bytes, 0);
-            }
-        }
-        mtx.unlock(); // Обязательно разблокируем!
+// Функция для работы с отдельным клиентом
+void ClientHandler(SOCKET current_client) {
+    // Обрабатываем сообщения пока клиент активен
+    while (ProcessClientMessage(current_client)) {
+        // Функция ProcessClientMessage сама обрабатывает всё
     }
 
     // Когда цикл закончился (клиент вышел):
@@ -60,6 +68,22 @@ void ClientHandler(SOCKET current_client) {
         connections.erase(it);
     }
     mtx.unlock();
+}
+
+// Функция для принятия нового подключения
+SOCKET AcceptNewConnection(SOCKET server_socket) {
+    sockaddr_in client_addr;
+    int addr_size = sizeof(client_addr);
+
+    // Ждем подключения (программа стоит тут)
+    SOCKET new_conn = accept(server_socket, (sockaddr*)&client_addr, &addr_size);
+
+    if (new_conn == INVALID_SOCKET) {
+        return INVALID_SOCKET; // Если ошибка, возвращаем INVALID_SOCKET
+    }
+
+    cout << "New client connected!" << endl;
+    return new_conn;
 }
 
 int main() {
@@ -99,17 +123,12 @@ int main() {
 
     // Главный цикл приема подключений
     while (true) {
-        sockaddr_in client_addr;
-        int addr_size = sizeof(client_addr);
-
-        // Ждем подключения (программа стоит тут)
-        SOCKET new_conn = accept(server_socket, (sockaddr*)&client_addr, &addr_size);
+        // Принимаем новое подключение через функцию
+        SOCKET new_conn = AcceptNewConnection(server_socket);
 
         if (new_conn == INVALID_SOCKET) {
             continue; // Если ошибка, просто идем дальше
         }
-
-        cout << "New client connected!" << endl;
 
         // Добавляем в общий список
         mtx.lock();
