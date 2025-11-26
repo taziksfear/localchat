@@ -16,6 +16,7 @@ using namespace std;
 // Глобальные переменные (чтобы были видны везде)
 vector<SOCKET> connections; 
 mutex mtx; // мьютекс для защиты списка от одновременного доступа
+bool server_running = true; // флаг работы сервера
 
 // Функция для обработки сообщений от клиента
 bool ProcessClientMessage(SOCKET current_client) {
@@ -54,8 +55,9 @@ bool ProcessClientMessage(SOCKET current_client) {
 // Функция для работы с отдельным клиентом
 void ClientHandler(SOCKET current_client) {
     // Обрабатываем сообщения пока клиент активен
-    while (ProcessClientMessage(current_client)) {
-        // Функция ProcessClientMessage сама обрабатывает всё
+    bool client_active = true;
+    while (client_active && server_running) {
+        client_active = ProcessClientMessage(current_client);
     }
 
     // Когда цикл закончился (клиент вышел):
@@ -75,15 +77,43 @@ SOCKET AcceptNewConnection(SOCKET server_socket) {
     sockaddr_in client_addr;
     int addr_size = sizeof(client_addr);
 
-    // Ждем подключения (программа стоит тут)
+    // Устанавливаем неблокирующий режим для accept
+    u_long mode = 1;
+    ioctlsocket(server_socket, FIONBIO, &mode);
+
+    // Ждем подключения с таймаутом
     SOCKET new_conn = accept(server_socket, (sockaddr*)&client_addr, &addr_size);
 
-    if (new_conn == INVALID_SOCKET) {
-        return INVALID_SOCKET; // Если ошибка, возвращаем INVALID_SOCKET
-    }
+    // Возвращаем блокирующий режим
+    mode = 0;
+    ioctlsocket(server_socket, FIONBIO, &mode);
 
-    cout << "New client connected!" << endl;
     return new_conn;
+}
+
+// Функция для обработки подключений
+void ProcessConnections(SOCKET server_socket) {
+    while (server_running) {
+        // Принимаем новое подключение через функцию
+        SOCKET new_conn = AcceptNewConnection(server_socket);
+
+        if (new_conn == INVALID_SOCKET) {
+            // Если нет подключений, небольшая пауза
+            this_thread::sleep_for(chrono::milliseconds(100));
+            continue;
+        }
+
+        cout << "New client connected!" << endl;
+
+        // Добавляем в общий список
+        mtx.lock();
+        connections.push_back(new_conn);
+        mtx.unlock();
+
+        // Создаем поток для этого клиента
+        thread t(ClientHandler, new_conn);
+        t.detach(); // Отпускаем поток в свободное плавание
+    }
 }
 
 int main() {
@@ -120,28 +150,23 @@ int main() {
     // 5. Запускаем прослушку
     listen(server_socket, SOMAXCONN);
     cout << "Server started on port 54000..." << endl;
+    cout << "Press Ctrl+C to stop the server..." << endl;
 
-    // Главный цикл приема подключений
-    while (true) {
-        // Принимаем новое подключение через функцию
-        SOCKET new_conn = AcceptNewConnection(server_socket);
+    // Запускаем обработку подключений
+    ProcessConnections(server_socket);
 
-        if (new_conn == INVALID_SOCKET) {
-            continue; // Если ошибка, просто идем дальше
-        }
-
-        // Добавляем в общий список
-        mtx.lock();
-        connections.push_back(new_conn);
-        mtx.unlock();
-
-        // Создаем поток для этого клиента
-        thread t(ClientHandler, new_conn);
-        t.detach(); // Отпускаем поток в свободное плавание
+    // Закрываем все соединения
+    mtx.lock();
+    for (SOCKET conn : connections) {
+        closesocket(conn);
     }
+    connections.clear();
+    mtx.unlock();
 
-    // Чистим за собой (хотя до сюда код не дойдет из-за while(true))
+    // Чистим за собой
     closesocket(server_socket);
     WSACleanup();
+    
+    cout << "Server stopped." << endl;
     return 0;
 }
